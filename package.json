@@ -1,0 +1,19 @@
+{
+  "name": "easyup",
+  "version": "1.0.0",
+  "description": "Resumable chunked file uploader for very large files (up to 50 GiB) with zero runtime dependencies.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "easyup": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}

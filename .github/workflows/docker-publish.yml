@@ -1,0 +1,134 @@
+name: Publish container image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'claude/**'
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # There are no dependencies to install, so this is the whole suite.
+      - name: Run tests
+        run: node --test 'test/*.test.js'
+
+  publish:
+    name: Build and push
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Pull requests build but never push: the token is read-only there.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=easyup
+            org.opencontainers.image.description=Resumable chunked uploader for files up to 50 GiB
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          echo "Testing $IMAGE"
+          docker run -d --name easyup-smoke -p 8080:8080 "$IMAGE"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/api/health
+          curl -fsS http://127.0.0.1:8080/api/config
+
+          # A real chunked upload through the running container.
+          head -c 20000000 /dev/urandom > /tmp/probe.bin
+          SIZE=$(stat -c%s /tmp/probe.bin)
+          ID=$(curl -fsS -X POST http://127.0.0.1:8080/api/uploads \
+                 -H 'content-type: application/json' \
+                 -d "{\"filename\":\"probe.bin\",\"size\":$SIZE}" \
+               | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")
+          split -b 8388608 /tmp/probe.bin /tmp/part-
+          i=0
+          for part in /tmp/part-*; do
+            curl -fsS -X PUT --data-binary "@$part" \
+              -H 'content-type: application/octet-stream' \
+              "http://127.0.0.1:8080/api/uploads/$ID/chunks/$i" > /dev/null
+            i=$((i+1))
+          done
+          curl -fsS -X POST "http://127.0.0.1:8080/api/uploads/$ID/complete" > /dev/null
+          curl -fsS "http://127.0.0.1:8080/api/files/$ID/download" -o /tmp/roundtrip.bin
+          cmp /tmp/probe.bin /tmp/roundtrip.bin && echo "round-trip OK ($i chunks)"
+          docker rm -f easyup-smoke
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo '${{ steps.meta.outputs.tags }}'
+            echo '```'
+            echo
+            echo "Pull with:"
+            echo '```sh'
+            echo "docker pull $(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

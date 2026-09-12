@@ -1,0 +1,9 @@
+.git
+.github
+data
+node_modules
+test
+*.md
+!README.md
+.gitignore
+.env

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>easyup — large file uploader</title>
+<meta name="description" content="Resumable chunked uploads for files up to 50 GiB.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Cpath d='M16 22V11m0 0-5 5m5-5 5 5' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="aurora" aria-hidden="true">
+  <span class="blob blob-a"></span>
+  <span class="blob blob-b"></span>
+  <span class="blob blob-c"></span>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="9"/>
+      <path d="M16 23V10m0 0-5.5 5.5M16 10l5.5 5.5" fill="none" stroke-width="2.6"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <h1>easyup</h1>
+      <p>Chunked, resumable uploads up to <span id="limit">50 GiB</span></p>
+    </div>
+  </div>
+  <dl class="stats" id="stats">
+    <div><dt>Files</dt><dd id="stat-files">—</dd></div>
+    <div><dt>Stored</dt><dd id="stat-stored">—</dd></div>
+    <div><dt>Free</dt><dd id="stat-free">—</dd></div>
+  </dl>
+</header>
+
+<main>
+  <!-- Drop target -------------------------------------------------------- -->
+  <section id="dropzone" class="dropzone" tabindex="0" role="button"
+           aria-label="Choose files to upload, or drop them here">
+    <input id="picker" type="file" multiple hidden>
+    <div class="dz-icon">
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M24 32V12m0 0-8 8m8-8 8 8" fill="none" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M8 30v4a6 6 0 0 0 6 6h20a6 6 0 0 0 6-6v-4" fill="none" stroke-width="2.5"
+              stroke-linecap="round"/>
+      </svg>
+    </div>
+    <p class="dz-title">Drop files here</p>
+    <p class="dz-sub">or <span class="link">browse</span> · paste · up to <strong id="limit-2">50 GiB</strong> each</p>
+    <ul class="dz-facts">
+      <li><span id="fact-chunk">8 MiB</span> chunks</li>
+      <li><span id="fact-conc">4</span> in parallel</li>
+      <li>auto-resume</li>
+    </ul>
+  </section>
+
+  <!-- Active transfers --------------------------------------------------- -->
+  <section class="panel" id="queue-panel" hidden>
+    <div class="panel-head">
+      <h2>Transfers</h2>
+      <div class="panel-actions">
+        <span class="overall" id="overall"></span>
+        <button class="btn ghost" id="clear-done" type="button">Clear finished</button>
+      </div>
+    </div>
+    <ul class="queue" id="queue"></ul>
+  </section>
+
+  <!-- Stored files ------------------------------------------------------- -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Uploaded</h2>
+      <button class="btn ghost" id="refresh" type="button">Refresh</button>
+    </div>
+    <ul class="files" id="files"></ul>
+    <p class="empty" id="files-empty">Nothing uploaded yet.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>easyup <span id="version"></span></span>
+  <span class="dot">·</span>
+  <a href="https://github.com/scopeddlol/easyup">source</a>
+</footer>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- Token prompt, shown only when the server requires one ---------------- -->
+<dialog id="token-dialog" class="token-dialog">
+  <form method="dialog">
+    <h2>Upload token required</h2>
+    <p>This server is protected. Paste the token to continue.</p>
+    <input id="token-input" type="password" placeholder="token" autocomplete="current-password">
+    <menu>
+      <button class="btn primary" id="token-save" value="save" type="submit">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<template id="queue-item">
+  <li class="item" data-state="pending">
+    <div class="item-top">
+      <span class="item-icon" data-role="icon"></span>
+      <div class="item-id">
+        <p class="item-name" data-role="name"></p>
+        <p class="item-meta"><span data-role="meta"></span></p>
+      </div>
+      <div class="item-controls">
+        <button class="icon-btn" data-action="toggle" type="button" title="Pause">
+          <svg viewBox="0 0 24 24" aria-hidden="true" data-role="toggle-icon">
+            <path d="M9 6v12M15 6v12" fill="none" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="icon-btn danger" data-action="cancel" type="button" title="Cancel">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7l10 10M17 7L7 17" fill="none" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="bar"><span class="bar-fill" data-role="fill"></span></div>
+    <div class="item-bottom">
+      <span class="pct" data-role="pct">0%</span>
+      <span class="sep">·</span>
+      <span data-role="progress"></span>
+      <span class="spacer"></span>
+      <span data-role="status" class="status"></span>
+    </div>
+  </li>
+</template>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

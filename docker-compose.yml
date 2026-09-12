@@ -1,0 +1,33 @@
+services:
+  easyup:
+    # Use the published image, or swap for `build: .` to run your local source.
+    image: ghcr.io/scopeddlol/easyup:latest
+    # build: .
+    container_name: easyup
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Largest single file accepted. Accepts plain bytes or a suffix.
+      MAX_FILE_SIZE: 50GiB
+      # Baseline chunk size; grows automatically so no file exceeds MAX_CHUNKS.
+      CHUNK_SIZE: 8MiB
+      # Parallel chunk requests the browser is told to use.
+      UPLOAD_CONCURRENCY: 4
+      # Incomplete uploads are swept after this many hours.
+      UPLOAD_TTL_HOURS: 24
+      # Uncomment to require `Authorization: Bearer <token>` on every API call.
+      # UPLOAD_TOKEN: change-me
+    volumes:
+      - easyup-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  # A named volume keeps uploads on a real filesystem rather than the container
+  # layer, which matters when a single file can be 50 GiB.
+  easyup-data:
