@@ -242,7 +242,15 @@ export async function writeChunk(id, index, source, declaredLength) {
   });
 
   const sink = fs.createWriteStream(blobPath(id), { flags: 'r+', start: offset });
-  await pipeline(source, limiter, sink);
+  try {
+    await pipeline(source, limiter, sink);
+  } catch (err) {
+    // The upload was aborted or swept while this chunk was in flight.
+    if (err.code === 'ENOENT') {
+      throw new HttpError(404, 'upload_not_found', 'This upload no longer exists.');
+    }
+    throw err;
+  }
   if (written !== expected) {
     throw new HttpError(400, 'chunk_size_mismatch',
       `Chunk ${index} must be exactly ${expected} bytes, got ${written}.`,
@@ -283,7 +291,12 @@ export async function completeUpload(id) {
       { missing: status.missing, receivedChunks: status.receivedChunks, chunkCount: upload.chunkCount });
   }
 
-  const stat = await fsp.stat(blobPath(id));
+  const stat = await fsp.stat(blobPath(id)).catch((err) => {
+    if (err.code === 'ENOENT') {
+      throw new HttpError(404, 'upload_not_found', 'This upload has already been completed or removed.');
+    }
+    throw err;
+  });
   if (stat.size !== upload.size) {
     throw new HttpError(422, 'size_mismatch',
       `Stored file is ${stat.size} bytes, expected ${upload.size}.`);

@@ -163,8 +163,9 @@ class Upload {
     this.buildNode();
   }
 
-  get sizeOf() {
-    return (index) => Math.min(this.chunkSize, this.file.size - index * this.chunkSize);
+  /** Byte length of one chunk; the last one is usually short. */
+  chunkBytes(index) {
+    return Math.min(this.chunkSize, this.file.size - index * this.chunkSize);
   }
 
   /** Confirmed bytes plus bytes currently in flight, for a smooth bar. */
@@ -208,7 +209,7 @@ class Upload {
         for (let i = 0; i < this.chunkCount; i += 1) {
           if (bitmap[i]) {
             this.done.add(i);
-            this.doneBytes += this.sizeOf(i);
+            this.doneBytes += this.chunkBytes(i);
           }
         }
         this.resumed = this.done.size > 0;
@@ -273,7 +274,7 @@ class Upload {
       try {
         await this.sendChunk(index);
         this.done.add(index);
-        this.doneBytes += this.sizeOf(index);
+        this.doneBytes += this.chunkBytes(index);
       } catch (err) {
         this.inflight.delete(index);
         if (err.name === 'AbortError') {
@@ -378,7 +379,7 @@ class Upload {
           this.done.delete(index);
           this.pending.push(index);
         }
-        this.doneBytes = [...this.done].reduce((sum, i) => sum + this.sizeOf(i), 0);
+        this.doneBytes = [...this.done].reduce((sum, i) => sum + this.chunkBytes(i), 0);
         await this.run();
         return;
       }
