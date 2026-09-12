@@ -31,8 +31,14 @@ Without Docker (Node 22+):
 npm start           # http://localhost:8080, data in ./data
 ```
 
-> The `:latest` tag is published from the default branch. Every branch and tag
-> also gets its own image — see [Published images](#published-images).
+> GHCR packages start out **private**, so authenticate before the first pull:
+>
+> ```sh
+> echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+> ```
+>
+> Any token with `read:packages` works. To drop that step, make the package
+> public — see [Published images](#published-images).
 
 ---
 
@@ -214,10 +220,18 @@ Images are built for `linux/amd64` and `linux/arm64` and pushed to GHCR by
 
 | Trigger | Tag |
 |---------|-----|
-| Push to the default branch | `latest`, `main`, `sha-<short>` |
-| Push to any other branch | `<branch-name>` (slashes become `-`) |
+| Push to the default branch | `latest`, `<branch-name>`, `sha-<short>` |
+| Push to any other branch | `<branch-name>` (slashes become `-`), `sha-<short>` |
 | Tag `v1.2.3` | `1.2.3`, `1.2`, `sha-<short>` |
 | Pull request | built and tested, not pushed |
+
+Tags currently published:
+
+```
+ghcr.io/scopeddlol/easyup:latest
+ghcr.io/scopeddlol/easyup:claude-sharp-knuth-g4jmrx
+ghcr.io/scopeddlol/easyup:sha-<short>
+```
 
 The workflow runs the test suite first, then builds, then starts the image and
 pushes a real multi-chunk upload through it before the job is allowed to pass.
