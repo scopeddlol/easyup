@@ -79,6 +79,14 @@ test('health and config expose the upload limits', async () => {
   assert.equal(cfg.body.chunkSize, CHUNK);
   assert.equal(cfg.body.maxFileSize, 10 * 1024 * 1024);
   assert.ok(cfg.body.concurrency >= 1);
+
+  // The browser's stall watchdogs come from here. If these ever go missing the
+  // client silently falls back to its defaults, so assert they are present.
+  assert.equal(typeof cfg.body.sendStallMs, 'number');
+  assert.equal(typeof cfg.body.responseStallMs, 'number');
+  assert.ok(cfg.body.sendStallMs > 0 && cfg.body.responseStallMs > 0);
+  assert.ok(cfg.body.responseStallMs >= cfg.body.sendStallMs,
+    'a server busy writing needs at least as long to answer as to receive');
 });
 
 test('a multi-chunk upload round-trips byte for byte', async () => {

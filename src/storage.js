@@ -45,6 +45,41 @@ export async function init() {
   await fsp.mkdir(filesDir(), { recursive: true });
 }
 
+/**
+ * Reserving a big file only stays cheap when the filesystem supports sparse
+ * files. On one that does not (exFAT, some NTFS mounts, some network shares)
+ * the reservation is written out in full and every upload crawls, so say so at
+ * startup rather than letting it look like a network problem.
+ */
+export async function probeSparseSupport() {
+  const probe = path.join(config.dataDir, `.sparse-probe-${process.pid}`);
+  const size = 64 * 1024 * 1024;
+  try {
+    const started = Date.now();
+    const handle = await fsp.open(probe, 'w');
+    try {
+      await handle.truncate(size);
+    } finally {
+      await handle.close();
+    }
+    const elapsed = Date.now() - started;
+    const stat = await fsp.stat(probe);
+    const allocated = stat.blocks * 512;
+    const sparse = allocated < size / 2;
+    if (!sparse) {
+      console.warn(`[easyup] WARNING: ${config.dataDir} does not appear to support sparse `
+        + `files (a ${size} byte reservation allocated ${allocated} bytes in ${elapsed}ms). `
+        + 'Large uploads will be slow; prefer ext4/xfs/btrfs/zfs for DATA_DIR.');
+    }
+    return { sparse, allocated, elapsedMs: elapsed };
+  } catch (err) {
+    console.warn(`[easyup] could not probe ${config.dataDir}: ${err.message}`);
+    return null;
+  } finally {
+    await fsp.rm(probe, { force: true }).catch(() => {});
+  }
+}
+
 /** Writes JSON via a temp file + rename, so readers never see a half-written doc. */
 async function writeJson(target, value) {
   const tmp = `${target}.${process.pid}.tmp`;
@@ -142,11 +177,18 @@ export async function createUpload({ filename, size, contentType, sha256 }) {
   await fsp.mkdir(uploadDir(id), { recursive: true });
   // Sparse allocation: instant even at 50 GiB, and it fails fast if the
   // filesystem cannot represent the size at all.
+  const allocStarted = Date.now();
   const handle = await fsp.open(blobPath(id), 'w');
   try {
     await handle.truncate(fileSize);
   } finally {
     await handle.close();
+  }
+  const allocMs = Date.now() - allocStarted;
+  if (allocMs > 1000) {
+    console.warn(`[easyup] reserving ${fileSize} bytes took ${allocMs}ms - ${config.dataDir} `
+      + 'may not support sparse files (exFAT/NTFS often do not), which will make '
+      + 'large uploads very slow');
   }
   await fsp.writeFile(bitsPath(id), Buffer.alloc(chunkCount));
   await writeJson(uploadMetaPath(id), upload);
@@ -241,6 +283,7 @@ export async function writeChunk(id, index, source, declaredLength) {
     },
   });
 
+  const writeStarted = Date.now();
   const sink = fs.createWriteStream(blobPath(id), { flags: 'r+', start: offset });
   try {
     await pipeline(source, limiter, sink);
@@ -257,7 +300,18 @@ export async function writeChunk(id, index, source, declaredLength) {
       { expected, received: written });
   }
 
+  const pipelineMs = Date.now() - writeStarted;
   await setBit(id, index);
+  const totalMs = Date.now() - writeStarted;
+  // The client gives up on a silent server, so a chunk that takes this long is
+  // the thing to look at first when uploads stall.
+  if (totalMs > 5000) {
+    console.warn(`[easyup] chunk ${index} of ${id} took ${totalMs}ms `
+      + `(${pipelineMs}ms write, ${totalMs - pipelineMs}ms fsync) for ${written} bytes `
+      + `- the disk behind ${config.dataDir} is the likely bottleneck`
+      + (config.syncChunks ? '; try SYNC_CHUNKS=false' : ''));
+  }
+
   const bits = await readBits(id);
   const status = summarize(upload, bits);
   return {

@@ -114,6 +114,8 @@ or a plain byte count.
 | `MAX_CHUNKS` | `10000` | Cap on chunks per file; raises chunk size if needed |
 | `UPLOAD_CONCURRENCY` | `4` | Parallel chunk requests the browser uses |
 | `UPLOAD_TTL_HOURS` | `24` | Incomplete uploads are swept after this long |
+| `SEND_STALL_SECONDS` | `45` | A chunk moving no bytes for this long is re-sent |
+| `RESPONSE_STALL_SECONDS` | `120` | A sent chunk left unanswered this long is re-sent |
 | `DISK_HEADROOM` | `1GiB` | Free space that must remain after a reservation |
 | `UPLOAD_TOKEN` | *(unset)* | If set, every API call needs this bearer token |
 | `SYNC_CHUNKS` | `true` | `fdatasync` each chunk before recording it |
@@ -266,6 +268,40 @@ public/           the web UI (vanilla JS, no build step)
 test/             API and large-file behaviour
 scripts/stress.js multi-GiB end-to-end check
 ```
+
+---
+
+## Troubleshooting
+
+### An upload stalls and the chunk count stops rising
+
+The tell is a transfer showing bytes sent but `0/N chunks` confirmed — the
+browser handed over the data and the server never answered. The client re-sends
+any chunk that goes quiet (see `SEND_STALL_SECONDS` / `RESPONSE_STALL_SECONDS`),
+so this recovers on its own, but repeated stalls mean the server is struggling.
+Check its log:
+
+```sh
+docker logs easyup | grep -i 'easyup\]'
+```
+
+At startup it reports what the storage can do:
+
+```
+[easyup] sparse files: supported (64 MiB reservation in 1ms) | fsync per chunk: on
+```
+
+- **`NOT SUPPORTED`** — `DATA_DIR` is on a filesystem without sparse files
+  (exFAT and some NTFS or network mounts). Every reservation is then written out
+  in full, so a 22 GiB upload writes 22 GiB of zeros before it can start. Move
+  `DATA_DIR` to ext4/xfs/btrfs/zfs. Check yours with `df -T /path/to/data`.
+- **Slow chunk warnings** (`chunk 12 of ... took 9400ms`) — the disk is the
+  bottleneck. Try `SYNC_CHUNKS=false` to skip the per-chunk `fdatasync`, and
+  lower `UPLOAD_CONCURRENCY` if the drive is spinning rust or USB.
+
+If chunks fail rather than stall, a reverse proxy in front may be capping the
+body size. A chunk is `CHUNK_SIZE` bytes, so nginx needs at least
+`client_max_body_size 16m;` for the 8 MiB default.
 
 ---
 

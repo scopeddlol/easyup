@@ -20,7 +20,7 @@ const state = {
 
 function formatBytes(bytes, digits) {
   if (!Number.isFinite(bytes)) return '—';
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
   const units = ['KiB', 'MiB', 'GiB', 'TiB'];
   let value = bytes / 1024;
   let unit = 0;
@@ -34,6 +34,7 @@ function formatBytes(bytes, digits) {
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds > 360000) return 'a very long time'; // 100h+: the estimate is meaningless
   if (seconds < 60) return `${Math.ceil(seconds)}s`;
   const mins = Math.floor(seconds / 60);
   if (mins < 60) return `${mins}m ${Math.round(seconds % 60)}s`;
@@ -143,6 +144,13 @@ const registry = {
 const RETRYABLE_STATUS = new Set([0, 408, 423, 425, 429, 500, 502, 503, 504, 507]);
 const MAX_ATTEMPTS = 5;
 
+/** No bytes moved for this long mid-body: assume the connection is dead. */
+const SEND_STALL_MS = 45_000;
+/** Body sent, but no answer for this long: the server is wedged or gone. */
+const RESPONSE_STALL_MS = 120_000;
+/** Below this the readout says "stalled" rather than printing a silly number. */
+const STALL_SPEED_FLOOR = 1024;
+
 class Upload {
   constructor(file) {
     this.file = file;
@@ -158,6 +166,7 @@ class Upload {
     this.error = '';
     this.doneBytes = 0;
     this.speed = 0;
+    this.stalls = 0;
     this.lastSample = { at: performance.now(), bytes: 0 };
     this.node = null;
     this.buildNode();
@@ -306,7 +315,8 @@ class Upload {
         const retryable = RETRYABLE_STATUS.has(err.status ?? 0);
         if (err.name === 'AbortError' || !retryable || attempt >= MAX_ATTEMPTS) throw err;
         const backoff = Math.min(8000, 400 * 2 ** (attempt - 1)) * (0.7 + Math.random() * 0.6);
-        this.note = `retrying chunk ${index + 1} (${attempt}/${MAX_ATTEMPTS})`;
+        this.note = `retrying chunk ${index + 1} (${attempt}/${MAX_ATTEMPTS})`
+          + (this.stalls ? ` · ${this.stalls} stall(s) recovered` : '');
         this.render();
         await new Promise((resolve) => setTimeout(resolve, backoff));
         if (this.state !== 'uploading') throw Object.assign(new Error('aborted'), { name: 'AbortError' });
@@ -322,17 +332,46 @@ class Upload {
       const xhr = new XMLHttpRequest();
       this.xhrs.set(index, xhr);
 
+      // A request can go silent in two places: mid-body, or after the body is
+      // sent while waiting for the server to answer. Neither raises an XHR
+      // error, so without this watchdog the chunk - and the whole upload -
+      // hangs forever. Losing a chunk to a false positive costs one re-send.
+      let lastActivity = Date.now();
+      let bodySent = false;
+      let stalled = false;
+      const sendLimit = state.config.sendStallMs || SEND_STALL_MS;
+      const responseLimit = state.config.responseStallMs || RESPONSE_STALL_MS;
+      const watchdog = setInterval(() => {
+        const idle = Date.now() - lastActivity;
+        if (idle < (bodySent ? responseLimit : sendLimit)) return;
+        stalled = true;
+        this.stalls += 1;
+        xhr.abort();
+      }, 2000);
+
+      const settle = (fn) => (...args) => {
+        clearInterval(watchdog);
+        this.xhrs.delete(index);
+        this.inflight.delete(index);
+        fn(...args);
+      };
+
       xhr.open('PUT', `/api/uploads/${encodeURIComponent(this.id)}/chunks/${index}`);
       xhr.responseType = 'text';
       if (state.token) xhr.setRequestHeader('authorization', `Bearer ${state.token}`);
 
       xhr.upload.onprogress = (event) => {
+        lastActivity = Date.now();
+        if (event.lengthComputable && event.loaded >= event.total) bodySent = true;
         this.inflight.set(index, event.loaded);
         this.render();
       };
-      xhr.onload = () => {
-        this.xhrs.delete(index);
-        this.inflight.delete(index);
+      // The body is fully handed off; from here we are waiting on the server.
+      xhr.upload.onload = () => {
+        lastActivity = Date.now();
+        bodySent = true;
+      };
+      xhr.onload = settle(() => {
         this.note = '';
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
@@ -344,18 +383,25 @@ class Upload {
           status: xhr.status,
           code: parsed?.error,
         }));
-      };
-      xhr.onerror = () => {
-        this.xhrs.delete(index);
-        this.inflight.delete(index);
+      });
+      xhr.onerror = settle(() => {
         reject(Object.assign(new Error('Network error'), { status: 0 }));
-      };
-      xhr.ontimeout = () => reject(Object.assign(new Error('Timed out'), { status: 408 }));
-      xhr.onabort = () => {
-        this.xhrs.delete(index);
-        this.inflight.delete(index);
+      });
+      xhr.ontimeout = settle(() => {
+        reject(Object.assign(new Error('Timed out'), { status: 408 }));
+      });
+      xhr.onabort = settle(() => {
+        // A watchdog abort is a transient failure to retry, not a user pause.
+        if (stalled) {
+          reject(Object.assign(new Error(
+            bodySent
+              ? `Server did not respond to chunk ${index + 1}`
+              : `Chunk ${index + 1} stalled in transit`,
+          ), { status: 0 }));
+          return;
+        }
         reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
-      };
+      });
       xhr.send(blob);
     });
   }
@@ -479,6 +525,9 @@ class Upload {
     const instant = delta / elapsed;
     // Exponential smoothing keeps the readout steady on bursty connections.
     this.speed = this.speed ? this.speed * 0.7 + instant * 0.3 : instant;
+    // Without a floor the smoothing asymptotes towards zero instead of
+    // reaching it, which turns into absurd rates and million-hour ETAs.
+    if (this.speed < STALL_SPEED_FLOOR && delta === 0) this.speed = 0;
     this.lastSample = { at: now, bytes: this.sentBytes };
   }
 
@@ -513,9 +562,19 @@ class Upload {
       status.textContent = 'Paused';
     } else if (this.note) {
       status.textContent = this.note;
-    } else if (this.speed > 0 && (this.state === 'uploading' || this.state === 'pausing')) {
-      const remaining = (this.file.size - this.sentBytes) / this.speed;
-      status.textContent = `${formatBytes(this.speed)}/s · ${formatDuration(remaining)} left`;
+    } else if (this.state === 'uploading' || this.state === 'pausing') {
+      const remainingBytes = this.file.size - this.sentBytes;
+      if (remainingBytes <= 0 && this.done.size < this.chunkCount) {
+        // Every byte is on the wire but the server has not acknowledged them,
+        // so there is no meaningful rate or ETA to quote.
+        status.textContent = `Waiting for the server to confirm ${this.chunkCount - this.done.size} chunk(s)…`;
+      } else if (this.speed >= STALL_SPEED_FLOOR) {
+        status.textContent = `${formatBytes(this.speed)}/s · ${formatDuration(remainingBytes / this.speed)} left`;
+      } else if (this.done.size || this.sentBytes) {
+        status.textContent = 'Stalled — retrying…';
+      } else {
+        status.textContent = 'Starting…';
+      }
     } else {
       status.textContent = 'Starting…';
     }
@@ -544,7 +603,8 @@ function renderOverall() {
   const total = active.reduce((sum, item) => sum + item.file.size, 0);
   const sent = active.reduce((sum, item) => sum + item.sentBytes, 0);
   const speed = active.reduce((sum, item) => sum + (item.state === 'uploading' ? item.speed : 0), 0);
-  label.textContent = `${active.length} active · ${formatBytes(sent)} / ${formatBytes(total)}${speed ? ` · ${formatBytes(speed)}/s` : ''}`;
+  label.textContent = `${active.length} active · ${formatBytes(sent)} / ${formatBytes(total)}`
+    + (speed >= STALL_SPEED_FLOOR ? ` · ${formatBytes(speed)}/s` : '');
 }
 
 function addFiles(files) {

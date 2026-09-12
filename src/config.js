@@ -59,6 +59,15 @@ export const config = {
   /** Incomplete uploads older than this are swept away. Default 24h. */
   uploadTtlMs: int(env.UPLOAD_TTL_HOURS, 24) * 60 * 60 * 1000,
 
+  /**
+   * Client-side watchdogs. A chunk that moves no bytes for sendStallMs, or that
+   * has been fully sent but unanswered for responseStallMs, is abandoned and
+   * re-sent. Raise them for a slow disk or a high-latency link; lower them to
+   * fail over faster.
+   */
+  sendStallMs: int(env.SEND_STALL_SECONDS, 45) * 1000,
+  responseStallMs: int(env.RESPONSE_STALL_SECONDS, 120) * 1000,
+
   /** Free space that must remain after a reservation, so the host never fills up. */
   diskHeadroom: parseSize(env.DISK_HEADROOM, 1 * GiB),
 

@@ -214,6 +214,8 @@ async function route(req, res, url) {
       chunkSize: config.chunkSize,
       maxChunks: config.maxChunks,
       concurrency: config.concurrency,
+      sendStallMs: config.sendStallMs,
+      responseStallMs: config.responseStallMs,
       authRequired: Boolean(config.token),
       version: config.version,
     });
@@ -351,6 +353,7 @@ export function createServer() {
 
 async function main() {
   await store.init();
+  const probe = await store.probeSparseSupport();
   const server = createServer();
 
   const sweepTimer = setInterval(() => {
@@ -365,6 +368,10 @@ async function main() {
   console.log(`[easyup] v${config.version} listening on http://${config.host}:${config.port}`);
   console.log(`[easyup] data dir: ${config.dataDir}`);
   console.log(`[easyup] max file size: ${maxGiB} GiB | chunk size: ${config.chunkSize / 1024 ** 2} MiB | auth: ${config.token ? 'on' : 'off'}`);
+  if (probe) {
+    console.log(`[easyup] sparse files: ${probe.sparse ? 'supported' : 'NOT SUPPORTED'} `
+      + `(64 MiB reservation in ${probe.elapsedMs}ms) | fsync per chunk: ${config.syncChunks ? 'on' : 'off'}`);
+  }
 
   const shutdown = (signal) => {
     console.log(`[easyup] ${signal} received, shutting down`);
