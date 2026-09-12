@@ -22,6 +22,9 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 test.after(async () => {
+  // Idle keep-alive sockets would otherwise hold close() open for the full
+  // keepAliveTimeout, stalling the run long after the assertions are done.
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(dataDir, { recursive: true, force: true });
 });
@@ -227,6 +230,19 @@ test('wrong-sized and out-of-range chunks are rejected', async () => {
   // A rejected chunk must not be recorded as received.
   const status = await api('GET', `/api/uploads/${upload.id}`);
   assert.equal(status.body.receivedChunks, 0);
+});
+
+test('a rejected chunk closes its connection instead of pinning it', async () => {
+  // The response goes out before the body has finished arriving, so the socket
+  // cannot be reused. Without this the connection would sit in the keep-alive
+  // pool for the full keepAliveTimeout.
+  const init = await api('POST', '/api/uploads', { filename: 'closes.bin', size: CHUNK * 2 });
+  const res = await fetch(`${base}/api/uploads/${init.body.id}/chunks/0`, {
+    method: 'PUT', body: Buffer.alloc(CHUNK + 1),
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.headers.get('connection'), 'close');
+  await res.text();
 });
 
 test('files over the size limit are refused up front', async () => {

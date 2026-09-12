@@ -47,6 +47,15 @@ function sendError(res, err) {
   });
 }
 
+/**
+ * Rejecting a chunk usually means answering before its body has finished
+ * arriving. Such a socket cannot safely be reused, and left in the keep-alive
+ * pool it would pin a connection for the full keepAliveTimeout, so close it.
+ */
+function closeAfterResponse(res) {
+  res.setHeader('connection', 'close');
+}
+
 /** Reads a small JSON request body. Chunk bodies never come through here. */
 async function readJsonBody(req, limit = 64 * 1024) {
   const chunks = [];
@@ -313,23 +322,19 @@ async function route(req, res, url) {
   throw new HttpError(405, 'method_not_allowed', `${method} is not allowed here.`);
 }
 
-/** Drains an unread request body so keep-alive connections stay usable. */
-function drain(req) {
-  if (req.readableEnded || req.destroyed) return;
-  req.resume();
-}
-
 export function createServer() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     res.setHeader('x-content-type-options', 'nosniff');
     route(req, res, url)
       .catch((err) => {
-        drain(req);
         if (res.headersSent) {
           res.destroy();
           return;
         }
+        // An unread body means we are answering mid-upload: say so in the
+        // response rather than draining megabytes we have already rejected.
+        if (!req.readableEnded) closeAfterResponse(res);
         sendError(res, err);
       });
   });

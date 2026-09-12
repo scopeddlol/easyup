@@ -18,6 +18,9 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 test.after(async () => {
+  // Idle keep-alive sockets would otherwise hold close() open for the full
+  // keepAliveTimeout, stalling the run long after the assertions are done.
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(dataDir, { recursive: true, force: true });
 });
